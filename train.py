@@ -12,8 +12,8 @@ from sklearn.metrics import accuracy_score
 import joblib, os, datetime
 
 # Load dataset
-DATA_PATH = "data/data.csv"
-df = pd.read_csv(DATA_PATH)
+# DATA_PATH = "data/data.csv"
+df = pd.read_csv("data.csv")
 
 #  Split data
 X = df.drop("species", axis=1)
