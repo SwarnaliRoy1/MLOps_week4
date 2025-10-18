@@ -1,0 +1,4 @@
+[core]
+    remote = gcs_remote
+['remote "gcs_remote"']
+    url = gs://mlops-precise-braid-474114-m3-week2
