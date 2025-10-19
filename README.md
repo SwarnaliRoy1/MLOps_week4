@@ -10,26 +10,41 @@ The pipeline showcases how to manage ML experiments efficiently while maintainin
 # Key Components
 
 => **Data Versioning:** DVC tracks data and model changes across commits
+
 => **Model Training:** train.py trains a Decision Tree Classifier on the Iris dataset
+
 => **Metrics Tracking:** Saves accuracy, precision, recall, and F1-score to artifacts/metrics.csv
+
 => **Remote Storage:** Model artifacts and datasets are stored on Google Cloud Storage (GCS)
+
 => **Automation:** Two shell scripts simplify setup, data sync, and pipeline execution
 
 # Setup Instructions
 
 **1. Clone the Repository**
+
 git clone https://github.com/SwarnaliRoy1/MLOps_week4.git
 cd MLOps_week4
+
 **2. Create and Activate Virtual Environment**
+
 python3 -m venv .env
 source .env/bin/activate
+
 **3. Install Dependencies**
+
 pip install -r req.txt
+
 **4. Configure DVC Remote (Google Cloud Storage)**
+
 dvc remote add -d gcs_remote gs://<your-bucket-name>
+
 dvc remote modify gcs_remote credentialpath ~/.config/gcloud/application_default_credentials.json
+
 **5. Push or Pull Data and Artifacts**
+
 dvc push -r gcs_remote       # Upload data/artifacts to GCS
+
 dvc pull -r gcs_remote       # Fetch data/artifacts from GCS
 
 # Continuous Integration (CI) & Sanity Tests
