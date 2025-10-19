@@ -1,0 +1,63 @@
+name: CI Pipeline for Main Branch
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  build-train-test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Set up CML
+        uses: iterative/setup-cml@v2
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r req.txt
+          pip install dvc[gcs]
+          pip install pytest pandas
+
+      - name: Pull data from DVC remote
+        run: |
+          dvc pull -r gcs_remote
+
+      - name: Train model
+        run: |
+          python train.py
+
+      - name: Run main branch tests
+        run: |
+          pytest -s tests/test_main.py 2>&1 | tee test_output_main.txt
+
+      - name: Create and publish CML report
+        env:
+          REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo "# CI Report for Main Branch" > report_main.md
+          echo "##  Test Results" >> report_main.md
+          echo "-----------------------------" >> report_main.md
+          cat test_output_main.txt >> report_main.md
+          echo "" >> report_main.md
+          echo "##  Model Metrics" >> report_main.md
+          echo "-----------------------------" >> report_main.md
+          cat artifacts/metrics.csv >> report_main.md
+          cml comment create --publish report_main.md
