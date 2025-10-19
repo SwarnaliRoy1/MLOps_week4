@@ -46,7 +46,7 @@ jobs:
 
       - name: Run main branch tests
         run: |
-          pytest -s tests/test_main.py 2>&1 | tee test_output_main.txt
+          pytest -s test_main.py 2>&1 | tee test_output_main.txt
 
       - name: Create and publish CML report
         env:
