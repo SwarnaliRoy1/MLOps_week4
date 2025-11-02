@@ -1,0 +1,139 @@
+name: Sanity Test (DVC data + MLflow model)
+
+on:
+  push:
+    branches: [ dev, main ]
+  pull_request:
+    branches: [ dev, main ]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sanity:
+    runs-on: ubuntu-latest
+    env:
+      # ---- project-specific defaults (edit if needed) ----
+      MODEL_NAME: Iris-Classifier
+      MODEL_ARTIFACT_SUBPATH: iris_model
+      DATA_CSV_PATH: data/data.csv
+      TARGET_COL: species
+      SAMPLE_N: "64"                 # used only by the "fast" evaluator variant
+      # ----------------------------------------------------
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python (match model’s env; 3.10 reduces warnings)
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('**/req.txt') }}
+          restore-keys: pip-${{ runner.os }}-
+
+      - name: Install system deps
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y git-lfs
+          git lfs install
+
+      - name: Auth to GCP (for DVC GCS remote)
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: (Optional) Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r req.txt
+
+      - name: DVC pull data from GCS remote
+        run: dvc pull -v
+
+      - name: Resolve MLflow model URI (Production → latest version fallback)
+        id: resolve
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          MODEL_NAME: ${{ env.MODEL_NAME }}
+        run: |
+          python - <<'PY'
+          import os, sys
+          import mlflow
+          from mlflow.tracking import MlflowClient
+          mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+          name = os.environ["MODEL_NAME"]
+
+          # 1) Try Production first
+          client = MlflowClient()
+          try:
+            prod = [v for v in client.search_model_versions(f"name='{name}'") if (v.current_stage or "").lower()=="production"]
+          except Exception as e:
+            prod = []
+          if prod:
+            uri = f"models:/{name}/Production"
+          else:
+            # 2) Fallback to latest version number
+            versions = client.search_model_versions(f"name='{name}'")
+            if not versions:
+              print(f"::error::No registered versions for model '{name}'."); sys.exit(1)
+            latest = max(versions, key=lambda v: int(v.version))
+            uri = f"models:/{name}/{latest.version}"
+          # Emit for next steps
+          with open(os.environ["GITHUB_OUTPUT"], "a") as f:
+            f.write(f"model_uri={uri}\n")
+          print(f"Resolved MODEL_URI: {uri}")
+          PY
+
+      - name: Install model-specific dependencies from MLflow
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          MODEL_URI: ${{ steps.resolve.outputs.model_uri }}
+        run: |
+          python - <<'PY'
+          import os, mlflow, subprocess, sys
+          mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+          uri = os.environ["MODEL_URI"]
+          req = mlflow.pyfunc.get_model_dependencies(uri)
+          print("Installing model deps from:", req)
+          subprocess.check_call([sys.executable, "-m", "pip", "install", "-r", req])
+          PY
+
+      - name: Run sanity evaluator (evaluate_best.py on single CSV)
+        env:
+          MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          MODEL_NAME: ${{ env.MODEL_NAME }}
+          MODEL_ARTIFACT_SUBPATH: ${{ env.MODEL_ARTIFACT_SUBPATH }}
+          # Prefer Production inside script, but it also falls back by metric:
+          PREFERRED_STAGE: Production
+          BEST_METRIC: accuracy
+          DATA_CSV_PATH: ${{ env.DATA_CSV_PATH }}
+          TARGET_COL: ${{ env.TARGET_COL }}
+          SAMPLE_N: ${{ env.SAMPLE_N }}
+        run: |
+          python ci/evaluate_best.py | tee sanity.json
+
+      - name: Post report as PR comment (CML)
+        if: ${{ github.event_name == 'pull_request' }}
+        env:
+          REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          echo '### Sanity Check (DVC + MLflow)' > report.md
+          echo '' >> report.md
+          echo '**Model URI:** `${{ steps.resolve.outputs.model_uri }}`' >> report.md
+          echo '' >> report.md
+          echo '\`\`\`json' >> report.md
+          cat sanity.json >> report.md
+          echo '\`\`\`' >> report.md
+          npx cml comment report.md

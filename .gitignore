@@ -1,2 +1,16 @@
 /data
 /artifacts
+# secrets / creds
+key.json
+
+# local env
+.venv/
+*.env
+
+# notebooks (optional)
+*.ipynb
+.ipynb_checkpoints/
+
+# data & artifacts (DVC will track pointers)
+data/
+artifacts/
