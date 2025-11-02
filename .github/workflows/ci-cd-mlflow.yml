@@ -11,25 +11,34 @@ permissions:
   pull-requests: write
   id-token: write
 
+env:
+  # ---- Shared CI/CD env ----
+  MODEL_NAME: Iris-Classifier
+  DATA_CSV_PATH: data/data.csv
+  TARGET_COL: species
+  GAR_REGION: us-central1
+  GAR_REPO: my-repo
+  IMAGE_NAME: iris-api
+  CLUSTER_NAME: gke-iris-cluster
+  CLUSTER_LOCATION: us-central1
+  NAMESPACE: default
+
 jobs:
-  sanity:
-    name: Sanity (DVC + MLflow) + CML
+  ci:
+    name: CI — DVC + MLflow sanity
     runs-on: ubuntu-latest
     env:
-      MODEL_NAME: Iris-Classifier
-      DATA_CSV_PATH: data/data.csv
-      TARGET_COL: species
       GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
       MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
-      # --- CD settings ---
-      GAR_REGION: us-central1
-      GAR_REPO: my-repo
-      IMAGE_NAME: iris-api
-      CLUSTER_NAME: gke-iris-cluster
-      CLUSTER_LOCATION: us-central1
-      NAMESPACE: default
 
     steps:
+      - name: Debug event/ref
+        run: |
+          echo "event_name=${{ github.event_name }}"
+          echo "ref=${{ github.ref }}"
+          echo "ref_name=${{ github.ref_name }}"
+          echo "actor=${{ github.actor }}"
+
       - name: Checkout
         uses: actions/checkout@v4
 
@@ -54,7 +63,7 @@ jobs:
           sudo apt-get install -y git-lfs
           git lfs install
 
-      - name: Auth to GCP (for DVC + GAR + GKE)
+      - name: Auth to GCP (for DVC on GCS)
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
@@ -64,7 +73,7 @@ jobs:
         with:
           project_id: ${{ env.GCP_PROJECT_ID }}
 
-      - name: Install Python deps (repo CI)
+      - name: Install Python deps
         run: |
           python -m pip install --upgrade pip
           pip install -r req.txt
@@ -81,11 +90,11 @@ jobs:
           python - <<'PY'
           import os, sys, mlflow
           from mlflow.tracking import MlflowClient
+
           mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
           name = os.environ["MODEL_NAME"]
           client = MlflowClient()
 
-          # ensure model exists
           try:
               client.get_registered_model(name)
           except Exception:
@@ -144,59 +153,139 @@ jobs:
           echo '\`\`\`' >> report.md
           cml comment create --publish report.md
 
-      # -------------------- CD: only on push to main or week6 --------------------
+  cd:
+    name: CD — Build → GAR → GKE
+    needs: ci
+    if: github.event_name == 'push' && (github.ref_name == 'main' || github.ref_name == 'week6')
+    runs-on: ubuntu-latest
+    env:
+      GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
+
+    steps:
+      - name: Debug event/ref
+        run: |
+          echo "event_name=${{ github.event_name }}"
+          echo "ref=${{ github.ref }}"
+          echo "ref_name=${{ github.ref_name }}"
+
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Auth to GCP
+        uses: google-github-actions/auth@v2
+        with:
+          credentials_json: ${{ secrets.GCP_SA_KEY }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
       - name: Configure Docker for Artifact Registry
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/week6')
-        run: gcloud auth configure-docker $GAR_REGION-docker.pkg.dev -q
+        run: gcloud auth configure-docker ${{ env.GAR_REGION }}-docker.pkg.dev -q
 
       - name: Build & push Docker image to GAR (fastapi/)
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/week6')
         env:
           IMG_SHA: ${{ github.sha }}
+          IMAGE_URI: ${{ env.GAR_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPO }}/${{ env.IMAGE_NAME }}
         run: |
           echo "Listing repo root"; ls -la
           echo "Listing fastapi dir"; ls -la fastapi
 
-          # Use classic docker builder to avoid buildx context confusion
           DOCKER_BUILDKIT=0 docker build \
             -f fastapi/Dockerfile \
-            -t ${GAR_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPO}/${IMAGE_NAME}:${IMG_SHA} \
-            -t ${GAR_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPO}/${IMAGE_NAME}:latest \
+            -t ${IMAGE_URI}:${IMG_SHA} \
+            -t ${IMAGE_URI}:latest \
             fastapi
 
-          docker push ${GAR_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPO}/${IMAGE_NAME}:${IMG_SHA}
-          docker push ${GAR_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPO}/${IMAGE_NAME}:latest
+          docker push ${IMAGE_URI}:${IMG_SHA}
+          docker push ${IMAGE_URI}:latest
 
       - name: Get GKE credentials
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/week6')
         uses: google-github-actions/get-gke-credentials@v2
         with:
           cluster_name: ${{ env.CLUSTER_NAME }}
           location: ${{ env.CLUSTER_LOCATION }}
           project_id: ${{ env.GCP_PROJECT_ID }}
 
-      - name: Apply manifests
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/week6')
-        run: |
-          kubectl apply -n ${NAMESPACE} -f k8s/deployment.yaml
-          kubectl apply -n ${NAMESPACE} -f k8s/service.yaml
-
-      - name: Update image to latest SHA
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/week6')
+      - name: Generate & apply manifests (no repo files)
         env:
           IMG_SHA: ${{ github.sha }}
+          IMAGE_URI: ${{ env.GAR_REGION }}-docker.pkg.dev/${{ env.GCP_PROJECT_ID }}/${{ env.GAR_REPO }}/${{ env.IMAGE_NAME }}
+          NAMESPACE: ${{ env.NAMESPACE }}
         run: |
-          kubectl set image deployment/iris-api \
-            iris-api=${GAR_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPO}/${IMAGE_NAME}:${IMG_SHA} \
-            -n ${NAMESPACE}
-          kubectl rollout status deployment/iris-api -n ${NAMESPACE} --timeout=180s
+          set -euo pipefail
+          DEPLOY=$(mktemp)
+          SERVICE=$(mktemp)
+
+          cat > "$DEPLOY" <<EOF
+          apiVersion: apps/v1
+          kind: Deployment
+          metadata:
+            name: iris-api
+            labels: { app: iris-api }
+          spec:
+            replicas: 2
+            revisionHistoryLimit: 3
+            strategy:
+              type: RollingUpdate
+              rollingUpdate: { maxUnavailable: 0, maxSurge: 1 }
+            selector:
+              matchLabels: { app: iris-api }
+            template:
+              metadata:
+                labels: { app: iris-api }
+              spec:
+                containers:
+                  - name: iris-api
+                    image: ${IMAGE_URI}:${IMG_SHA}
+                    imagePullPolicy: IfNotPresent
+                    ports:
+                      - containerPort: 8000
+                    readinessProbe:
+                      httpGet: { path: "/", port: 8000 }
+                      initialDelaySeconds: 5
+                      periodSeconds: 10
+                      timeoutSeconds: 2
+                      failureThreshold: 6
+                    livenessProbe:
+                      httpGet: { path: "/", port: 8000 }
+                      initialDelaySeconds: 15
+                      periodSeconds: 20
+                      timeoutSeconds: 2
+                      failureThreshold: 3
+                    resources:
+                      requests: { cpu: "100m", memory: "256Mi" }
+                      limits:   { cpu: "500m", memory: "512Mi" }
+          EOF
+
+          cat > "$SERVICE" <<EOF
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: iris-api
+            labels: { app: iris-api }
+          spec:
+            type: ClusterIP
+            selector: { app: iris-api }
+            ports:
+              - name: http
+                port: 80
+                targetPort: 8000
+          EOF
+
+          kubectl get ns "${NAMESPACE}" >/dev/null 2>&1 || kubectl create ns "${NAMESPACE}"
+          kubectl apply -n "${NAMESPACE}" -f "$DEPLOY"
+          kubectl apply -n "${NAMESPACE}" -f "$SERVICE"
+
+      - name: Rollout status
+        run: |
+          kubectl rollout status deployment/iris-api -n ${{ env.NAMESPACE }} --timeout=180s
 
       - name: In-cluster smoke test (GET /)
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/week6')
         run: |
-          # curl inside the cluster via Service DNS (uses default port 80->containerPort)
-          kubectl run smoke --rm -i --restart=Never -n ${NAMESPACE} \
+          kubectl run smoke --rm -i --restart=Never -n ${{ env.NAMESPACE }} \
             --image=curlimages/curl -- \
-            -sS http://iris-api.${NAMESPACE}.svc.cluster.local/ \
+            -sS http://iris-api.${{ env.NAMESPACE }}.svc.cluster.local/ \
             | tee smoke_root.txt
           grep -q 'Welcome to the Iris Classifier API' smoke_root.txt
