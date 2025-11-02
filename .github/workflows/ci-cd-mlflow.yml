@@ -2,9 +2,9 @@ name: CI + CD (DVC data, MLflow model → GAR + GKE)
 
 on:
   push:
-    branches: [ dev, main, ci-mlflow ]
+    branches: [ dev, main, week6 ]
   pull_request:
-    branches: [ dev, main, ci-mlflow ]
+    branches: [ dev, main, week6 ]
 
 permissions:
   contents: write
@@ -144,13 +144,13 @@ jobs:
           echo '\`\`\`' >> report.md
           cml comment create --publish report.md
 
-      # -------------------- CD: only on push to main or ci-mlflow --------------------
+      # -------------------- CD: only on push to main or week6 --------------------
       - name: Configure Docker for Artifact Registry
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci-mlflow')
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/week6')
         run: gcloud auth configure-docker $GAR_REGION-docker.pkg.dev -q
 
       - name: Build & push Docker image to GAR (fastapi/)
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci-mlflow')
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/week6')
         env:
           IMG_SHA: ${{ github.sha }}
         run: |
@@ -168,7 +168,7 @@ jobs:
           docker push ${GAR_REGION}-docker.pkg.dev/${GCP_PROJECT_ID}/${GAR_REPO}/${IMAGE_NAME}:latest
 
       - name: Get GKE credentials
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci-mlflow')
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/week6')
         uses: google-github-actions/get-gke-credentials@v2
         with:
           cluster_name: ${{ env.CLUSTER_NAME }}
@@ -176,13 +176,13 @@ jobs:
           project_id: ${{ env.GCP_PROJECT_ID }}
 
       - name: Apply manifests
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci-mlflow')
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/week6')
         run: |
           kubectl apply -n ${NAMESPACE} -f k8s/deployment.yaml
           kubectl apply -n ${NAMESPACE} -f k8s/service.yaml
 
       - name: Update image to latest SHA
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci-mlflow')
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/week6')
         env:
           IMG_SHA: ${{ github.sha }}
         run: |
@@ -192,7 +192,7 @@ jobs:
           kubectl rollout status deployment/iris-api -n ${NAMESPACE} --timeout=180s
 
       - name: In-cluster smoke test (GET /)
-        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/ci-mlflow')
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/week6')
         run: |
           # curl inside the cluster via Service DNS (uses default port 80->containerPort)
           kubectl run smoke --rm -i --restart=Never -n ${NAMESPACE} \
