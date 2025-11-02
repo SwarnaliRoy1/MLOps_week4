@@ -1,4 +1,4 @@
-# MLOps: DVC + Google Cloud Storage Pipeline
+# MLOps: DVC + Mlflow + Google Cloud Storage Pipeline
 
 This project demonstrates an end-to-end Machine Learning workflow using **DVC (Data Version Control)** with **Google Cloud Storage (GCS)** as the remote storage backend.
 It automates data management, model versioning, and CI/CD testing with GitHub Actions and CML.
