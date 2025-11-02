@@ -1,4 +1,4 @@
-name: Sanity Test (DVC data + MLflow model)
+name: Sanity Test for CI-CD
 
 on:
   push:
