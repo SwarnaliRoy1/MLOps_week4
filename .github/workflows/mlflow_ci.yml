@@ -2,9 +2,9 @@ name: Sanity (DVC data + MLflow Production)
 
 on:
   push:
-    branches: [dev, main]
+    branches: [dev, main, ci-mlflow]
   pull_request:
-    branches: [dev, main]
+    branches: [dev, main, ci-mlflow]
 
 permissions:
   contents: write
