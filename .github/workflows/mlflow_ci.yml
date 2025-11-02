@@ -14,14 +14,11 @@ jobs:
   sanity:
     runs-on: ubuntu-latest
     env:
-      # ---- project-specific defaults ----
-      MODEL_NAME: Iris-Classifier
+      MODEL_NAME: Iris-Classifier          # <-- ensure this EXACT name exists in your registry
       DATA_CSV_PATH: data/data.csv
       TARGET_COL: species
-      # expose the secret to env so we can check it in `if:`
       GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
       MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
-      # -----------------------------------
 
     steps:
       - name: Checkout
@@ -64,44 +61,58 @@ jobs:
       - name: DVC pull data from GCS
         run: dvc pull -v
 
-      # Keep the resolver simple and fast: prefer Production. If not present,
-      # only then list versions and take the highest version number.
-      - name: Resolve MLflow model URI
+      # NEW: alias-first resolver (no deprecated stages call)
+      - name: Resolve MLflow model URI (aliases -> latest version)
         id: resolve
         env:
           MODEL_NAME: ${{ env.MODEL_NAME }}
           MLFLOW_TRACKING_URI: ${{ env.MLFLOW_TRACKING_URI }}
         run: |
           python - <<'PY'
-          import os, sys, json
+          import os, sys
           import mlflow
           from mlflow.tracking import MlflowClient
+          from mlflow.exceptions import MlflowException
 
           mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
           name = os.environ["MODEL_NAME"]
           client = MlflowClient()
 
-          # Try Production directly with a cheap query
-          prod = client.get_latest_versions(name, stages=["Production"])
-          if prod:
-            uri = f"models:/{name}/Production"
+          def exists_registered_model(n):
+            try:
+              client.get_registered_model(n)
+              return True
+            except Exception:
+              return False
+
+          if not exists_registered_model(name):
+            print(f"::error::Registered model '{name}' not found at {os.environ['MLFLOW_TRACKING_URI']}. "
+                  f"Make sure you registered it with the SAME name and the tracking URI is correct.")
+            sys.exit(1)
+
+          # Try aliases (recommended)
+          for alias in ("champion", "production"):
+            try:
+              v = client.get_model_version_by_alias(name, alias)
+              uri = f"models:/{name}@{alias}"
+              print(f"Resolved via alias: {uri} (version {v.version})")
+              break
+            except MlflowException:
+              continue
           else:
-            # Fallback: take the highest version only if we must
+            # Fallback: pick highest version number
             versions = client.search_model_versions(f"name='{name}'")
             if not versions:
-              print(f"::error::No registered versions for model '{name}'.")
+              print(f"::error::Model '{name}' has no versions in the registry.")
               sys.exit(1)
-            latest = max(versions, key=lambda v: int(v.version))
+            latest = max(versions, key=lambda m: int(m.version))
             uri = f"models:/{name}/{latest.version}"
+            print(f"Resolved via latest version fallback: {uri}")
 
-          # Emit output
-          print(f"Resolved MODEL_URI: {uri}")
           with open(os.environ["GITHUB_OUTPUT"], "a") as f:
             f.write(f"model_uri={uri}\n")
           PY
 
-      # Super-light evaluator inline (no repo changes needed).
-      # Loads the model and prints a small JSON summary to stdout.
       - name: Evaluate model on CSV
         env:
           MODEL_URI: ${{ steps.resolve.outputs.model_uri }}
@@ -109,10 +120,7 @@ jobs:
           TARGET_COL: ${{ env.TARGET_COL }}
         run: |
           python - <<'PY'
-          import os, json
-          import pandas as pd
-          import mlflow
-
+          import os, json, pandas as pd, mlflow
           data_csv = os.environ["DATA_CSV_PATH"]
           target = os.environ["TARGET_COL"]
           model_uri = os.environ["MODEL_URI"]
@@ -122,18 +130,11 @@ jobs:
           y = df[target]
 
           model = mlflow.pyfunc.load_model(model_uri)
-          # Try predict; if estimator has predict_proba we ignore it for simplicity
           y_pred = model.predict(X)
+          acc = float((y_pred == y).mean())
 
-          # simple accuracy (works for Iris)
-          acc = (y_pred == y).mean()
-          report = {
-            "model_uri": model_uri,
-            "rows": int(len(df)),
-            "accuracy": float(acc)
-          }
+          report = {"model_uri": model_uri, "rows": int(len(df)), "accuracy": acc}
           print(json.dumps(report, indent=2))
-          # also persist for PR comment step
           with open("sanity.json", "w") as f:
             json.dump(report, f, indent=2)
           PY
