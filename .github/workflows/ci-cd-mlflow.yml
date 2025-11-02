@@ -2,9 +2,9 @@ name: CI + CD (DVC data, MLflow model → GAR + GKE)
 
 on:
   push:
-    branches: [ dev, main, week6 ]
+    branches: [ main, week6 ]
   pull_request:
-    branches: [ dev, main, week6 ]
+    branches: [ main, week6 ]
 
 permissions:
   contents: write
