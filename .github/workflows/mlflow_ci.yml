@@ -1,4 +1,4 @@
-name: Sanity Test (DVC + MLflow)
+name: Sanity (DVC data + MLflow Production)
 
 on:
   push:
@@ -14,46 +14,99 @@ jobs:
   sanity:
     runs-on: ubuntu-latest
     env:
-      MODEL_NAME: Iris-Classifier
-      MODEL_ARTIFACT_SUBPATH: iris_model
-      DATA_CSV_PATH: data/data.csv
-      TARGET_COL: species
-      SAMPLE_N: "64"
-      PREFERRED_STAGE: Production
-      BEST_METRIC: accuracy
+      MODEL_NAME: Iris-Classifier          # change if needed
+      DATA_CSV_PATH: data/data.csv         # your DVC-tracked file
+      TARGET_COL: species                  # target column in CSV
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-python@v5
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          python-version: '3.10'
+          python-version: "3.10"
 
-      - name: Speedy pip install (wheels only)
+      - name: Cache pip
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('**/req.txt') }}
+          restore-keys: pip-${{ runner.os }}-
+
+      - name: Install system deps (git-lfs for DVC)
         run: |
-          python -m pip install --upgrade pip
-          PIP_ONLY_BINARY=:all: pip install -r req.txt
+          sudo apt-get update -y
+          sudo apt-get install -y git-lfs
+          git lfs install
 
-      - name: Auth to GCP for DVC (GCS)
+      - name: Auth to GCP (for DVC GCS remote)
         uses: google-github-actions/auth@v2
         with:
           credentials_json: ${{ secrets.GCP_SA_KEY }}
 
-      - name: Pull data via DVC
+      # Optional, but harmless: makes gcloud available in PATH
+      - name: Setup gcloud (optional)
+        if: ${{ secrets.GCP_PROJECT_ID != '' }}
+        uses: google-github-actions/setup-gcloud@v2
+        with:
+          project_id: ${{ secrets.GCP_PROJECT_ID }}
+
+      - name: Install Python deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r req.txt
+
+      - name: DVC pull data
         run: dvc pull -v
 
-      - name: Run sanity evaluator
+      - name: Set MODEL_URI to Production
+        id: uri
+        env:
+          MODEL_NAME: ${{ env.MODEL_NAME }}
+        run: |
+          echo "model_uri=models:/${MODEL_NAME}/Production" >> "$GITHUB_OUTPUT"
+
+      - name: Evaluate model on CSV
         env:
           MLFLOW_TRACKING_URI: ${{ secrets.MLFLOW_TRACKING_URI }}
+          MODEL_URI: ${{ steps.uri.outputs.model_uri }}
+          DATA_CSV_PATH: ${{ env.DATA_CSV_PATH }}
+          TARGET_COL: ${{ env.TARGET_COL }}
         run: |
-          python ci/evaluate_best.py | tee sanity.json
+          python - <<'PY'
+          import os, json, mlflow
+          import pandas as pd
+          from sklearn.metrics import accuracy_score
 
-      - name: Comment results (PR only)
+          mlflow.set_tracking_uri(os.environ["MLFLOW_TRACKING_URI"])
+          model = mlflow.pyfunc.load_model(os.environ["MODEL_URI"])
+
+          df = pd.read_csv(os.environ["DATA_CSV_PATH"])
+          y = df.pop(os.environ["TARGET_COL"])
+          y_pred = model.predict(df)
+
+          # Handle pandas Series/ndarray differences
+          try:
+              acc = accuracy_score(y, y_pred)
+          except Exception:
+              import numpy as np
+              acc = accuracy_score(y, np.asarray(y_pred).ravel())
+
+          out = {"model_uri": os.environ["MODEL_URI"], "accuracy": acc}
+          print(json.dumps(out, indent=2))
+          with open("sanity.json", "w") as f:
+              json.dump(out, f)
+          PY
+
+      - name: Comment result on PR (CML)
         if: ${{ github.event_name == 'pull_request' }}
         env:
           REPO_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          echo '### Sanity Check (DVC + MLflow)' > report.md
+          echo '### Sanity Check (MLflow Production + DVC data)' > report.md
+          echo '' >> report.md
+          echo '**Model URI:** `${{ steps.uri.outputs.model_uri }}`' >> report.md
           echo '' >> report.md
           echo '\`\`\`json' >> report.md
           cat sanity.json >> report.md
